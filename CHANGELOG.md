@@ -1,3 +1,18 @@
+## Unreleased
+
+### Compatibility Notes (Potentially Breaking)
+
+- **`JsonEnum` wire format is now standard JSON Schema**:
+  - `JsonEnum.toJson()` emits standard JSON Schema enum forms instead of the legacy
+    `type: 'enum'` / `values` shape.
+  - Legacy serialized enum input using `values` is still accepted when parsing.
+
+### Reliability
+
+- Fixed `JsonEnum` tool/input schema serialization to use standard JSON Schema enum output,
+  improving compatibility with downstream consumers that reject the legacy
+  `type: 'enum'` / `values` shape.
+
 ## 2.1.0
 
 ### Compatibility Notes (Potentially Breaking)
@@ -15,10 +30,6 @@
   - Prefer normalized access via `contentBlocks`.
 - **Enum expansion**:
   - `StopReason` now includes `toolUse`; exhaustive `switch` statements may need an additional branch.
-- **`JsonEnum` wire format is now standard JSON Schema**:
-  - `JsonEnum.toJson()` emits standard JSON Schema enum forms instead of the legacy
-    `type: 'enum'` / `values` shape.
-  - Legacy serialized enum input using `values` is still accepted when parsing.
 
 ### Features
 
@@ -46,9 +57,6 @@
 - Fixed Streamable HTTP `Accept` header parsing to handle repeated/multi-value headers without throwing `HttpException`, improving compatibility with clients that send duplicated or split `Accept` values.
 - Centralized DNS rebinding validation across Streamable HTTP and legacy SSE server entry points.
 - Added interop coverage for Dart/TypeScript sampling flows (`sampling.tools` capability and tool-choice propagation).
-- Fixed `JsonEnum` tool/input schema serialization to use standard JSON Schema enum output,
-  improving compatibility with downstream consumers that reject the legacy
-  `type: 'enum'` / `values` shape.
 
 ## 2.0.0
 
