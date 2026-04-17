@@ -138,6 +138,15 @@ class StreamableHTTPServerTransport implements Transport {
   final String? Function()? _sessionIdGenerator;
   bool _started = false;
   final Map<String, HttpResponse> _streamMapping = {};
+  // The standalone SSE GET stream uses a detached raw [Socket] instead of
+  // an [HttpResponse] so we can observe TCP close via `socket.listen(
+  // onDone: ...)`. Dart's `HttpResponse.done` does NOT fire when the
+  // client disconnects the underlying TCP (verified — a flush on a
+  // half-closed connection just buffers in the kernel until the buffer
+  // fills). `_streamMapping` still tracks request-scoped POST streams
+  // where HttpResponse is fine because their lifetime is bounded by the
+  // response itself.
+  Socket? _standaloneSseSocket;
   final Map<dynamic, String> _requestToStreamMapping = {};
   final Map<dynamic, JsonRpcMessage> _requestResponseMap = {};
   bool _initialized = false;
@@ -358,7 +367,7 @@ class StreamableHTTPServerTransport implements Transport {
     }
 
     // Check if there's already an active standalone SSE stream for this session
-    if (_streamMapping[_standaloneSseStreamId] != null) {
+    if (_standaloneSseSocket != null) {
       // Only one GET SSE stream is allowed per session
       req.response
         ..statusCode = HttpStatus.conflict
@@ -377,35 +386,44 @@ class StreamableHTTPServerTransport implements Transport {
       return;
     }
 
-    // We need to send headers immediately as messages will arrive much later,
-    // otherwise the client will just wait for the first message
+    // Set status + headers on the response; `detachSocket()` will flush
+    // them before handing us the raw socket.
     req.response.statusCode = HttpStatus.ok;
     headers.forEach((key, value) {
       req.response.headers.set(key, value);
     });
 
-    // Assign the response to the standalone SSE stream before flushing
-    // to ensure it's available if a task tries to send a message immediately
-    _streamMapping[_standaloneSseStreamId] = req.response;
+    final Socket socket;
+    try {
+      socket = await req.response.detachSocket();
+    } catch (e) {
+      onerror?.call(e is Error ? e : StateError(e.toString()));
+      return;
+    }
 
-    await req.response.flush();
-
-    stderr.writeln('[mcp_dart] standalone SSE opened for sid=$sessionId');
+    _standaloneSseSocket = socket;
     onstandalonesseopen?.call();
 
-    // Set up close handler for client disconnects. The standalone SSE is
-    // THE long-lived server-to-client channel; once the client closes it
-    // there is no way for the server to push notifications back to this
-    // session. Invoke [onclose] unconditionally so consumers can prune
-    // their bookkeeping — don't wait for request-scoped streams, since
-    // their `.done` handlers fire in non-deterministic order and a POST
-    // stream still in the map would silently suppress this signal.
-    req.response.done.then((_) {
-      stderr.writeln('[mcp_dart] standalone SSE done for sid=$sessionId');
-      _streamMapping.remove(_standaloneSseStreamId);
-      onstandalonesseclose?.call();
-      onclose?.call();
-    });
+    // Listen on the socket's inbound half to detect client disconnect.
+    // The SSE GET has no request body so nothing meaningful should arrive;
+    // onDone fires reliably when the peer sends FIN/RST.
+    socket.listen(
+      (_) {}, // ignore any unexpected inbound bytes
+      onDone: _closeStandaloneSse,
+      onError: (_) => _closeStandaloneSse(),
+      cancelOnError: false,
+    );
+  }
+
+  void _closeStandaloneSse() {
+    final sock = _standaloneSseSocket;
+    if (sock == null) return; // already closed
+    _standaloneSseSocket = null;
+    try {
+      sock.destroy();
+    } catch (_) {}
+    onstandalonesseclose?.call();
+    onclose?.call();
   }
 
   /// Replays events that would have been sent after the specified event ID
@@ -475,6 +493,29 @@ class StreamableHTTPServerTransport implements Transport {
       await res.flush();
       return true;
     } catch (e) {
+      return false;
+    }
+  }
+
+  /// Writes an event directly to a raw [Socket]. Used for the standalone
+  /// SSE GET stream where we need reliable TCP-level disconnect detection
+  /// that [HttpResponse.done] does not provide.
+  Future<bool> _writeSSEEventToSocket(
+    Socket socket,
+    JsonRpcMessage message, [
+    String? eventId,
+  ]) async {
+    var eventData = "event: message\n";
+    if (eventId != null) {
+      eventData += "id: $eventId\n";
+    }
+    eventData += "data: ${jsonEncode(message.toJson())}\n\n";
+
+    try {
+      socket.add(utf8.encode(eventData));
+      await socket.flush();
+      return true;
+    } catch (_) {
       return false;
     }
   }
@@ -858,6 +899,19 @@ class StreamableHTTPServerTransport implements Transport {
     }
     _streamMapping.clear();
 
+    // Also tear down the detached standalone SSE socket if one is held.
+    // We deliberately bypass [_closeStandaloneSse] here so we don't refire
+    // onclose from inside ourselves — upstream Protocol code already
+    // handles teardown when close() returns.
+    final standalone = _standaloneSseSocket;
+    _standaloneSseSocket = null;
+    if (standalone != null) {
+      try {
+        standalone.destroy();
+      } catch (_) {}
+      onstandalonesseclose?.call();
+    }
+
     // Clear any pending responses
     _requestResponseMap.clear();
     _requestToStreamMapping.clear(); // Also clear this map
@@ -883,24 +937,23 @@ class StreamableHTTPServerTransport implements Transport {
         );
       }
 
-      final standaloneSse = _streamMapping[_standaloneSseStreamId];
-      if (standaloneSse == null) {
+      final socket = _standaloneSseSocket;
+      if (socket == null) {
         // The spec says the server MAY send messages on the stream, so it's ok to discard if no stream
         return;
       }
 
-      // Generate and store event ID if event store is provided
       String? eventId;
       if (_eventStore != null) {
-        // Stores the event and gets the generated event ID
         eventId = await _eventStore!.storeEvent(
           _standaloneSseStreamId,
           message,
         );
       }
 
-      // Send the message to the standalone SSE stream
-      await _writeSSEEvent(standaloneSse, message, eventId);
+      if (!await _writeSSEEventToSocket(socket, message, eventId)) {
+        _closeStandaloneSse();
+      }
       return;
     }
 

@@ -119,6 +119,11 @@ class StreamableMcpServer {
           ...defaultDnsRebindingAllowedHosts,
         };
 
+  /// Port the underlying [HttpServer] is bound to after [start] completes.
+  /// Useful when you passed `port: 0` and need to discover the
+  /// OS-assigned port.
+  int? get boundPort => _httpServer?.port;
+
   /// Starts the HTTP server.
   Future<void> start() async {
     if (_httpServer != null) {
