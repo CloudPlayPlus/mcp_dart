@@ -390,6 +390,7 @@ class StreamableHTTPServerTransport implements Transport {
 
     await req.response.flush();
 
+    stderr.writeln('[mcp_dart] standalone SSE opened for sid=$sessionId');
     onstandalonesseopen?.call();
 
     // Set up close handler for client disconnects. The standalone SSE is
@@ -400,6 +401,7 @@ class StreamableHTTPServerTransport implements Transport {
     // their `.done` handlers fire in non-deterministic order and a POST
     // stream still in the map would silently suppress this signal.
     req.response.done.then((_) {
+      stderr.writeln('[mcp_dart] standalone SSE done for sid=$sessionId');
       _streamMapping.remove(_standaloneSseStreamId);
       onstandalonesseclose?.call();
       onclose?.call();
