@@ -157,6 +157,19 @@ class StreamableHTTPServerTransport implements Transport {
   @override
   void Function()? onclose;
 
+  /// Fired once the long-lived standalone SSE GET stream has been accepted
+  /// and its response headers flushed. Use this to track "is a client
+  /// actively listening for server-initiated events on this session"
+  /// — sessions can exist (session-id issued via POST initialize) without
+  /// ever having a listener.
+  void Function()? onstandalonesseopen;
+
+  /// Fired when the standalone SSE GET stream closes. Pairs with
+  /// [onstandalonesseopen]. Runs BEFORE [onclose] chains downstream, so
+  /// consumers can observe "client stopped listening" independently of
+  /// the session teardown that [onclose] initiates.
+  void Function()? onstandalonesseclose;
+
   @override
   void Function(Error error)? onerror;
 
@@ -377,6 +390,8 @@ class StreamableHTTPServerTransport implements Transport {
 
     await req.response.flush();
 
+    onstandalonesseopen?.call();
+
     // Set up close handler for client disconnects. The standalone SSE is
     // THE long-lived server-to-client channel; once the client closes it
     // there is no way for the server to push notifications back to this
@@ -386,6 +401,7 @@ class StreamableHTTPServerTransport implements Transport {
     // stream still in the map would silently suppress this signal.
     req.response.done.then((_) {
       _streamMapping.remove(_standaloneSseStreamId);
+      onstandalonesseclose?.call();
       onclose?.call();
     });
   }

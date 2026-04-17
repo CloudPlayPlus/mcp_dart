@@ -84,6 +84,20 @@ class StreamableMcpServer {
   /// you need short-lived connections cleaned up.
   final Duration? httpIdleTimeout;
 
+  /// Invoked when a session's standalone GET SSE stream has been accepted
+  /// — i.e. a client is actively listening for server-initiated events on
+  /// that session. This is the right signal for "is anyone receiving what
+  /// I broadcast right now" counters. Sessions can exist without a
+  /// listener (a POST initialize creates a session even if the client
+  /// never opens the GET), so counting [serverFactory] invocations will
+  /// over-count.
+  final void Function(String sessionId)? onClientConnected;
+
+  /// Invoked when a session's standalone GET SSE stream closes. Pairs
+  /// with [onClientConnected]. Fires on TCP disconnect, DELETE request,
+  /// or server shutdown.
+  final void Function(String sessionId)? onClientDisconnected;
+
   StreamableMcpServer({
     required McpServer Function(String sessionId) serverFactory,
     this.host = 'localhost',
@@ -97,6 +111,8 @@ class StreamableMcpServer {
     this.strictProtocolVersionHeaderValidation = true,
     this.rejectBatchJsonRpcPayloads = true,
     this.httpIdleTimeout,
+    this.onClientConnected,
+    this.onClientDisconnected,
   })  : _serverFactory = serverFactory,
         _defaultDnsRebindingAllowedHosts = {
           normalizeDnsHost(host),
@@ -365,6 +381,17 @@ class StreamableMcpServer {
         _logger.info('Session closed: $sid');
       }
     };
+
+    if (onClientConnected != null || onClientDisconnected != null) {
+      transport.onstandalonesseopen = () {
+        final sid = transport.sessionId;
+        if (sid != null) onClientConnected?.call(sid);
+      };
+      transport.onstandalonesseclose = () {
+        final sid = transport.sessionId;
+        if (sid != null) onClientDisconnected?.call(sid);
+      };
+    }
 
     return transport;
   }
