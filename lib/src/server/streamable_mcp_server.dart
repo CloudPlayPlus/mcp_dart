@@ -77,6 +77,13 @@ class StreamableMcpServer {
   // Keep track of servers to close them if needed, though closing transport usually suffices
   final Map<String, McpServer> _servers = {};
 
+  /// Idle timeout for the underlying [HttpServer]. Dart's default is 120
+  /// seconds, which kills long-lived SSE streams that go quiet. For MCP
+  /// channel use the stream must survive indefinite idle periods, so the
+  /// default here is `null` (disabled). Set to a non-null [Duration] if
+  /// you need short-lived connections cleaned up.
+  final Duration? httpIdleTimeout;
+
   StreamableMcpServer({
     required McpServer Function(String sessionId) serverFactory,
     this.host = 'localhost',
@@ -89,6 +96,7 @@ class StreamableMcpServer {
     this.allowedOrigins,
     this.strictProtocolVersionHeaderValidation = true,
     this.rejectBatchJsonRpcPayloads = true,
+    this.httpIdleTimeout,
   })  : _serverFactory = serverFactory,
         _defaultDnsRebindingAllowedHosts = {
           normalizeDnsHost(host),
@@ -102,6 +110,7 @@ class StreamableMcpServer {
     }
 
     _httpServer = await HttpServer.bind(host, port);
+    _httpServer!.idleTimeout = httpIdleTimeout;
     _logger.info(
       'MCP Streamable HTTP Server listening on http://$host:$port$path',
     );

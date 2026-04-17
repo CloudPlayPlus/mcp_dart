@@ -380,6 +380,14 @@ class StreamableHTTPServerTransport implements Transport {
     // Set up close handler for client disconnects
     req.response.done.then((_) {
       _streamMapping.remove(_standaloneSseStreamId);
+      // If there are no other streams for this session, the session has no
+      // active channel back to the client. Invoke [onclose] so consumers
+      // can prune their own session bookkeeping. The session *record* still
+      // exists in the manager — a fresh GET would re-open it — but callers
+      // that care about "is a client currently listening" need this signal.
+      if (_streamMapping.isEmpty) {
+        onclose?.call();
+      }
     });
   }
 
