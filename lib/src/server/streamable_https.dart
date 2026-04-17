@@ -377,17 +377,16 @@ class StreamableHTTPServerTransport implements Transport {
 
     await req.response.flush();
 
-    // Set up close handler for client disconnects
+    // Set up close handler for client disconnects. The standalone SSE is
+    // THE long-lived server-to-client channel; once the client closes it
+    // there is no way for the server to push notifications back to this
+    // session. Invoke [onclose] unconditionally so consumers can prune
+    // their bookkeeping — don't wait for request-scoped streams, since
+    // their `.done` handlers fire in non-deterministic order and a POST
+    // stream still in the map would silently suppress this signal.
     req.response.done.then((_) {
       _streamMapping.remove(_standaloneSseStreamId);
-      // If there are no other streams for this session, the session has no
-      // active channel back to the client. Invoke [onclose] so consumers
-      // can prune their own session bookkeeping. The session *record* still
-      // exists in the manager — a fresh GET would re-open it — but callers
-      // that care about "is a client currently listening" need this signal.
-      if (_streamMapping.isEmpty) {
-        onclose?.call();
-      }
+      onclose?.call();
     });
   }
 
