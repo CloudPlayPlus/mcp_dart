@@ -392,6 +392,14 @@ class StreamableHTTPServerTransport implements Transport {
     headers.forEach((key, value) {
       req.response.headers.set(key, value);
     });
+    // Disable chunked transfer encoding: after detachSocket we write raw
+    // SSE bytes directly, without chunk framing. If Dart leaves chunked
+    // on, HTTP clients that parse the body (e.g. Claude Code's MCP
+    // client) will fail to decode every event and silently drop them.
+    req.response.headers.chunkedTransferEncoding = false;
+    // Match: no content-length, server closes at end. Valid per HTTP/1.1
+    // for streaming responses when chunked is disabled.
+    req.response.contentLength = -1;
 
     final Socket socket;
     try {
