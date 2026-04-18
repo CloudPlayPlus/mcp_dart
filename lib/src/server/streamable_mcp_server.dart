@@ -98,6 +98,12 @@ class StreamableMcpServer {
   /// or server shutdown.
   final void Function(String sessionId)? onClientDisconnected;
 
+  /// Retry interval in milliseconds advertised to clients on each POST
+  /// response's SSE priming event. Mirrors the Node SDK's `retryInterval`
+  /// option. Only takes effect when [eventStore] is configured AND the
+  /// client negotiated protocol version `2025-11-25` or later.
+  final int? retryInterval;
+
   StreamableMcpServer({
     required McpServer Function(String sessionId) serverFactory,
     this.host = 'localhost',
@@ -113,6 +119,7 @@ class StreamableMcpServer {
     this.httpIdleTimeout,
     this.onClientConnected,
     this.onClientDisconnected,
+    this.retryInterval,
   })  : _serverFactory = serverFactory,
         _defaultDnsRebindingAllowedHosts = {
           normalizeDnsHost(host),
@@ -351,6 +358,7 @@ class StreamableMcpServer {
         strictProtocolVersionHeaderValidation:
             strictProtocolVersionHeaderValidation,
         rejectBatchJsonRpcPayloads: rejectBatchJsonRpcPayloads,
+        retryInterval: retryInterval,
         onsessioninitialized: (sid) {
           _logger.info('Session initialized: $sid');
           _transports[sid] = transport;
