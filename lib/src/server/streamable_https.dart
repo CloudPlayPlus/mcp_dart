@@ -410,6 +410,7 @@ class StreamableHTTPServerTransport implements Transport {
     }
 
     _standaloneSseSocket = socket;
+    _enableTcpKeepalive(socket);
     onstandalonesseopen?.call();
 
     // Listen on the socket's inbound half to detect client disconnect.
@@ -421,6 +422,61 @@ class StreamableHTTPServerTransport implements Transport {
       onError: (_) => _closeStandaloneSse(),
       cancelOnError: false,
     );
+  }
+
+  /// Turn on OS-level TCP keepalive so the kernel detects half-open
+  /// connections (laptop-sleep, network drop, peer crash without RST) and
+  /// eventually tears the socket down. Without this, the Dart side happily
+  /// writes into a send buffer that never drains — the SSE stream looks
+  /// alive forever and our [onstandalonesseclose] hook never fires.
+  ///
+  /// The timing we pick here is "start probing after ~60s idle, probe
+  /// every ~10s, give up after 3 probes" so a stuck connection drops in
+  /// roughly 90 seconds on a quiet session. Best-effort: if the OS
+  /// rejects any option we just move on — the remaining probes + the
+  /// default system keepalive still help.
+  static void _enableTcpKeepalive(Socket sock) {
+    // SO_KEEPALIVE = 1 enables the feature. Constants differ per platform.
+    int soLevel;
+    int soKeepalive;
+    if (Platform.isMacOS || Platform.isIOS) {
+      soLevel = 0xffff; // SOL_SOCKET on BSD/macOS
+      soKeepalive = 0x0008; // SO_KEEPALIVE
+    } else {
+      soLevel = 1; // SOL_SOCKET on Linux, Android, Windows
+      soKeepalive = 9; // SO_KEEPALIVE on Linux/Android/Windows
+    }
+    final on = Uint8List(4)..buffer.asByteData().setInt32(0, 1, Endian.host);
+
+    void trySet(int level, int opt, Uint8List value) {
+      try {
+        sock.setRawOption(RawSocketOption(level, opt, value));
+      } catch (_) {
+        // best-effort
+      }
+    }
+
+    trySet(soLevel, soKeepalive, on);
+
+    const ipprotoTcp = 6;
+    final idle = Uint8List(4)..buffer.asByteData().setInt32(0, 60, Endian.host);
+    final intvl =
+        Uint8List(4)..buffer.asByteData().setInt32(0, 10, Endian.host);
+    final cnt = Uint8List(4)..buffer.asByteData().setInt32(0, 3, Endian.host);
+
+    if (Platform.isMacOS || Platform.isIOS) {
+      // TCP_KEEPALIVE — seconds of idle before first probe.
+      trySet(ipprotoTcp, 0x10, idle);
+      // TCP_KEEPINTVL / TCP_KEEPCNT on modern macOS.
+      trySet(ipprotoTcp, 0x101, intvl);
+      trySet(ipprotoTcp, 0x102, cnt);
+    } else {
+      // Linux / Android.
+      // TCP_KEEPIDLE = 4, TCP_KEEPINTVL = 5, TCP_KEEPCNT = 6
+      trySet(ipprotoTcp, 4, idle);
+      trySet(ipprotoTcp, 5, intvl);
+      trySet(ipprotoTcp, 6, cnt);
+    }
   }
 
   void _closeStandaloneSse() {
