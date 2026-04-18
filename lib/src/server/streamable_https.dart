@@ -80,6 +80,14 @@ class StreamableHTTPServerTransportOptions {
   /// Set to false for backward-compatibility behavior.
   final bool rejectBatchJsonRpcPayloads;
 
+  /// Retry interval in milliseconds suggested to clients in the SSE `retry`
+  /// field of the priming event written at the start of a POST-returned
+  /// response stream. Has no effect unless [eventStore] is configured and
+  /// the client negotiated protocol version `2025-11-25` or later (older
+  /// clients can't parse an SSE event with empty data). Matches the Node
+  /// SDK's `retryInterval` option.
+  final int? retryInterval;
+
   /// Creates configuration options for StreamableHTTPServerTransport
   StreamableHTTPServerTransportOptions({
     this.sessionIdGenerator,
@@ -91,6 +99,7 @@ class StreamableHTTPServerTransportOptions {
     this.allowedOrigins,
     this.strictProtocolVersionHeaderValidation = true,
     this.rejectBatchJsonRpcPayloads = true,
+    this.retryInterval,
   });
 }
 
@@ -159,6 +168,7 @@ class StreamableHTTPServerTransport implements Transport {
   final Set<String>? _allowedOrigins;
   final bool _strictProtocolVersionHeaderValidation;
   final bool _rejectBatchJsonRpcPayloads;
+  final int? _retryInterval;
 
   @override
   String? sessionId;
@@ -197,7 +207,8 @@ class StreamableHTTPServerTransport implements Transport {
         _allowedOrigins = options.allowedOrigins,
         _strictProtocolVersionHeaderValidation =
             options.strictProtocolVersionHeaderValidation,
-        _rejectBatchJsonRpcPayloads = options.rejectBatchJsonRpcPayloads;
+        _rejectBatchJsonRpcPayloads = options.rejectBatchJsonRpcPayloads,
+        _retryInterval = options.retryInterval;
 
   /// Starts the transport. This is required by the Transport interface but is a no-op
   /// for the Streamable HTTP transport as connections are managed per-request.
@@ -834,6 +845,19 @@ class StreamableHTTPServerTransport implements Transport {
           _streamMapping.remove(streamId);
         });
 
+        if (!_enableJsonResponse) {
+          // Write the priming event before the first real response so the
+          // client gets an `id` it can resume from and the `retry` hint
+          // we configured. Matches Node SDK `writePrimingEvent` placement.
+          final clientProtocolVersion =
+              _clientProtocolVersion(messages, req);
+          await _writePrimingEvent(
+            req.response,
+            streamId,
+            clientProtocolVersion,
+          );
+        }
+
         // Handle each message
         for (final message in messages) {
           try {
@@ -1099,6 +1123,67 @@ class StreamableHTTPServerTransport implements Transport {
         }
       }
     }
+  }
+
+  /// Writes an SSE priming event at the start of a POST-returned response
+  /// stream. Mirrors the Node SDK's `writePrimingEvent`:
+  ///   * requires [_eventStore] — the stored event id is what lets the
+  ///     client resume from this point via `Last-Event-ID`;
+  ///   * requires the client negotiated protocol version `2025-11-25` or
+  ///     later — older clients cannot parse an SSE event with empty data;
+  ///   * includes the configured [_retryInterval] so the client's backoff
+  ///     policy starts from the server's preference rather than its own
+  ///     defaults.
+  ///
+  /// No-op when the conditions aren't met, matching upstream behaviour.
+  Future<void> _writePrimingEvent(
+    HttpResponse res,
+    String streamId,
+    String clientProtocolVersion,
+  ) async {
+    if (_eventStore == null) return;
+    if (clientProtocolVersion.compareTo('2025-11-25') < 0) return;
+
+    final eventId = await _eventStore!.storeEvent(
+      streamId,
+      // Empty JSON-RPC notification carries no payload; only the event
+      // id matters for resumption.
+      const JsonRpcNotification(method: ''),
+    );
+
+    final buf = StringBuffer()..write('id: $eventId\n');
+    if (_retryInterval != null) {
+      buf.write('retry: $_retryInterval\n');
+    }
+    buf.write('data: \n\n');
+
+    try {
+      res.add(utf8.encode(buf.toString()));
+      await res.flush();
+    } catch (_) {
+      // Best-effort — if the client hung up before we could write, the
+      // regular POST handler will surface the failure when it tries to
+      // send the real response.
+    }
+  }
+
+  /// Extracts the client's negotiated protocol version. For an initialize
+  /// request the version comes from the request params; for every other
+  /// request the client must have sent it as an `MCP-Protocol-Version`
+  /// header (validated earlier).
+  String _clientProtocolVersion(
+    List<JsonRpcMessage> messages,
+    HttpRequest req,
+  ) {
+    for (final m in messages) {
+      if (m is JsonRpcRequest && m.method == 'initialize') {
+        final version = m.params?['protocolVersion'];
+        if (version is String && version.isNotEmpty) return version;
+      }
+    }
+    final header = req.headers.value('mcp-protocol-version');
+    if (header != null && header.trim().isNotEmpty) return header.trim();
+    return latestProtocolVersion;
   }
 
   /// Checks if a message is an initialize request
